@@ -1,48 +1,100 @@
-# Use the file format compatible with Docker Compose 3.8
-version: "3.8"
+version: '3.8'
 
 services:
-  database:
-    image: postgres:11.5
+  app: &app
+    build:
+      # set build dir to .dockerdev
+      context: .dockerdev
+      dockerfile: Dockerfile
+      args:
+        RUBY_VERSION: '3.0.1'
+        PG_MAJOR: '13'
+        BUNDLER_VERSION: '2.2.15'
+    # set specific tags for builds; `latest` tag will imply uneeded rebuilds.
+    image: cryptotickr-dev:1.0.0
+    # allow cli env execution: `RAILS_ENV=test docker-compose up rails`
+    environment: &env
+      RAILS_ENV: ${RAILS_ENV:-development}
+    # speed up build iteration process by using linux based caching to avoid h/d r/w outs.
+    tmpfs:
+      - /tmp
 
+  backend: &backend
+    <<: *app
+    # allow bash commands into rails instance.
+    stdin_open: true
+    tty: true
     volumes:
-      # Tell Docker where on PostgreSQL container to keep data
-      # Store data in volume db_data
-      - db_data:/var/lib/postgresql/data
-
-      # copies init.sql file into /docker-entrypoint-initdb.d/init.sql
-      # function: to create user for postgres instance named `boats_development`.
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
-  web:
-    # The root directory from which we're building.
-    build: .
-
-    # This makes it so any code changes inside the project directory get synced with Docker. 
-    # Prevents need to keep restarting container when changing source code of Rails project.
-    volumes:
-      - .:/code:cached
-
-    # The command to be run when we run "docker-compose up".
-    command: bash -c "rm -f tmp/pids/server.pid && bundle exec rails s -p 3000 -b '0.0.0.0'"
-
-    # Expose port 3010 and map it to port 3000 in the container.
-    ports:
-      - "3010:3000"
-
-    # Specify that this container depends on the other
-    # container which we've called "database".
-    depends_on:
-      - database
-
-    # Specify the values of the environment variables
-    # used in this container.
+      # use caching to speed up builds
+      - .:/app:cached
+      - rails_cache:/app/tmp/cache
+      - bundle:/usr/local/bundle
+      - .dockerdev/.psqlrc:/root/.psqlrc:ro
     environment:
-      RAILS_ENV: development
-      DATABASE_NAME: cryptotickr_development
-      DATABASE_USER: cryptotickr_development
-      DATABASE_PASSWORD: 
-      DATABASE_HOST: database
+      <<: *env
+      REDIS_URL: redis://redis:6379/
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432
+      BOOTSNAP_CACHE_DIR: /usr/local/bundle/_bootsnap
+      WEB_CONCURRENCY: 1
+      HISTFILE: /app/log/.bash_history
+      PSQL_HISTFILE: /app/log/.psql_history
+      EDITOR: vi
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
-# Declare the volumes that our application uses.
+  # shortcut for `docker-compose run web /bin/bash`    
+  # use as: `docker-compose run --rm runner`
+  runner:
+    <<: *backend
+    command: /bin/bash
+    # For notes on netowork binding read: https://pythonspeed.com/articles/docker-connection-refused/
+    ports:
+      - '3010:3000'
+      #- '3002:3002'
+
+  # Execute service as: `dockerc run -p 3010:3000 rails`
+  rails:
+    <<: *backend
+    command: bundle exec rails server -b 0.0.0.0 -p 3000
+    ports:
+      - '3010:3000'
+
+  sidekiq:
+    <<: *backend
+    command: bundle exec sidekiq -C config/sidekiq.yml
+
+  postgres:
+    image: postgres:13
+    volumes:
+      - .psqlrc:/root/.psqlrc:ro
+      - postgres:/var/lib/postgresql/data
+      - ./log:/root/log:cached
+    environment:
+      PSQL_HISTFILE: /root/log/.psql_history
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - 5432
+    healthcheck:
+      test: pg_isready -U postgres -h 127.0.0.1
+      interval: 5s
+
+  redis:
+    image: redis:3.2-alpine
+    volumes:
+      - redis:/data
+    ports:
+      - 6379
+    healthcheck:
+      test: redis-cli ping
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
 volumes:
-  db_data:
+  postgres:
+  redis:
+  bundle:
+  rails_cache:
