@@ -1,3 +1,4 @@
+# To speed up Rails builds (esp. on Mac), leverage the local Linux OS in the container.
 ARG RUBY_VERSION
 # See explanation below
 FROM ruby:$RUBY_VERSION-slim-buster
